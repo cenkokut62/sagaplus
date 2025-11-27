@@ -1,0 +1,56 @@
+-- 1. ADIM: Mevcut karmaşık ve çift (duplicate) politikaların hepsini temizle
+DROP POLICY IF EXISTS "Allow read access cities" ON "public"."cities";
+DROP POLICY IF EXISTS "Cities are editable by admins only" ON "public"."cities";
+DROP POLICY IF EXISTS "Cities are viewable by everyone" ON "public"."cities";
+
+DROP POLICY IF EXISTS "Allow read access teams" ON "public"."teams";
+DROP POLICY IF EXISTS "Teams are editable by admins only" ON "public"."teams";
+DROP POLICY IF EXISTS "Teams are viewable by everyone" ON "public"."teams";
+
+DROP POLICY IF EXISTS "Allow read access titles" ON "public"."titles";
+DROP POLICY IF EXISTS "Titles are editable by admins only" ON "public"."titles";
+DROP POLICY IF EXISTS "Titles are viewable by everyone" ON "public"."titles";
+
+DROP POLICY IF EXISTS "Enable read access for all users" ON "public"."profiles";
+DROP POLICY IF EXISTS "Profiles are viewable by everyone" ON "public"."profiles";
+DROP POLICY IF EXISTS "Profiles editable by owner OR admin" ON "public"."profiles";
+DROP POLICY IF EXISTS "Users can insert own profile" ON "public"."profiles";
+DROP POLICY IF EXISTS "Profiles insertable by admin trigger" ON "public"."profiles";
+
+-- 2. ADIM: Temiz ve Tekil SELECT (Görüntüleme) Kuralları Oluştur
+-- Herkes (giriş yapmış) bu tabloları görebilsin
+CREATE POLICY "Read Access: Cities" ON "public"."cities" FOR SELECT TO authenticated USING (true);
+CREATE POLICY "Read Access: Teams" ON "public"."teams" FOR SELECT TO authenticated USING (true);
+CREATE POLICY "Read Access: Titles" ON "public"."titles" FOR SELECT TO authenticated USING (true);
+CREATE POLICY "Read Access: Profiles" ON "public"."profiles" FOR SELECT TO authenticated USING (true);
+
+-- 3. ADIM: Profiles İçin Yazma/Güncelleme Kuralları
+-- Kullanıcılar kendi profilini, Adminler herkesi güncelleyebilir
+CREATE POLICY "Update Access: Profiles" 
+ON "public"."profiles" 
+FOR UPDATE 
+TO authenticated 
+USING ( (auth.uid() = id) OR is_admin() )
+WITH CHECK ( (auth.uid() = id) OR is_admin() );
+
+-- Insert (Trigger veya kullanıcı bazlı ekleme)
+CREATE POLICY "Insert Access: Profiles" 
+ON "public"."profiles" 
+FOR INSERT 
+TO authenticated 
+WITH CHECK ( (auth.uid() = id) OR is_admin() );
+
+-- 4. ADIM: Admin Yönetim Kuralları (Teams, Titles, Cities)
+-- Sadece adminler ekleyip silebilir/düzenleyebilir
+CREATE POLICY "Admin All Access: Cities" ON "public"."cities" FOR ALL TO authenticated USING ( is_admin() );
+CREATE POLICY "Admin All Access: Teams" ON "public"."teams" FOR ALL TO authenticated USING ( is_admin() );
+CREATE POLICY "Admin All Access: Titles" ON "public"."titles" FOR ALL TO authenticated USING ( is_admin() );
+
+-- 5. ADIM: KRİTİK - Fonksiyon ve Şema Yetkileri
+-- "Personel Bulunamadı" hatasının gizli sebebi genelde budur.
+GRANT USAGE ON SCHEMA public TO authenticated;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO authenticated;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO authenticated;
+
+-- is_admin fonksiyonu varsa ona da çalışma izni ver
+GRANT EXECUTE ON FUNCTION is_admin TO authenticated;
