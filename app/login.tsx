@@ -266,7 +266,8 @@ export default function LoginScreen() {
                     {savedUser.email}
                   </Text>
 
-                  {isBiometricSupported && (
+                  {/* DEĞİŞİKLİK BURADA: Biyometrik Varsa Buton, Yoksa Şifre Alanı */}
+                  {isBiometricSupported ? (
                     <TouchableOpacity 
                       style={[styles.biometricButton, { backgroundColor: colors.primary || '#007AFF' }]}
                       onPress={handleBiometricAuth}
@@ -282,6 +283,35 @@ export default function LoginScreen() {
                         </>
                       )}
                     </TouchableOpacity>
+                  ) : (
+                    // --- BİYOMETRİK YOKSA ŞİFRE ALANI ---
+                    <View style={{ width: '100%', marginBottom: 16, marginTop: 8 }}>
+                      <CustomInput
+                        label="Şifre"
+                        placeholder="••••••••"
+                        value={password}
+                        onChangeText={setPassword}
+                        icon="lock-closed-outline"
+                        secureTextEntry={!showPassword}
+                        rightIcon={showPassword ? 'eye-off-outline' : 'eye-outline'}
+                        onRightIconPress={() => setShowPassword(!showPassword)}
+                      />
+                      <TouchableOpacity
+                        style={[styles.loginButton, { backgroundColor: colors.primary || '#007AFF', marginTop: 12, height: 50 }]}
+                        onPress={() => handleLogin(false)}
+                        activeOpacity={0.9}
+                        disabled={loading}
+                      >
+                        {loading ? (
+                          <ActivityIndicator color="#ffffff" />
+                        ) : (
+                          <>
+                            <Text style={[styles.loginButtonText, { fontSize: 16 }]}>Giriş Yap</Text>
+                            <Ionicons name="arrow-forward" size={20} color="#FFF" style={{ marginLeft: 8 }} />
+                          </>
+                        )}
+                      </TouchableOpacity>
+                    </View>
                   )}
 
                   <TouchableOpacity onPress={handleSwitchAccount} style={styles.switchAccountButton}>

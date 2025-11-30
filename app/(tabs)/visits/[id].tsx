@@ -22,6 +22,7 @@ export default function VisitDetailScreen() {
 
   const fetchVisitDetails = async () => {
     try {
+      // 1. Ziyaret Detayını Çek
       const { data: visitData, error: visitError } = await supabase
         .from('visits')
         .select('*')
@@ -31,11 +32,20 @@ export default function VisitDetailScreen() {
       if (visitError) throw visitError;
       setVisit(visitData);
 
-      const { data: offerData } = await supabase
+      // 2. Teklif Detayını Çek (Varsa, oluşturan personel bilgisiyle birlikte)
+      const { data: offerData, error: offerError } = await supabase
         .from('offers')
-        .select('*')
+        .select(`
+          *,
+          profiles:user_id (
+            full_name,
+            email,
+            phone,
+            titles (name)
+          )
+        `)
         .eq('visit_id', id)
-        .single();
+        .maybeSingle();
       
       if (offerData) setOffer(offerData);
 
@@ -53,36 +63,45 @@ export default function VisitDetailScreen() {
     return `${h > 0 ? h + ' sa ' : ''}${m} dk`;
   };
 
-  // AKILLI SÜRE GÖSTERİMİ: Veritabanı 0 ise tarihlerden hesapla
   const getDisplayDuration = () => {
-    // 1. Veritabanında kayıtlı doğru süre varsa onu kullan
     if (visit.duration_seconds && visit.duration_seconds > 0) {
         return formatDuration(visit.duration_seconds);
     }
-    
-    // 2. Yoksa ve giriş-çıkış saatleri varsa, farkı hesapla
     if (visit.started_at && visit.ended_at) {
         const start = new Date(visit.started_at).getTime();
         const end = new Date(visit.ended_at).getTime();
         const diffSec = Math.floor((end - start) / 1000);
         return formatDuration(diffSec);
     }
-
     return "0 dk";
   };
 
   const handleOpenPDF = async () => {
-    if (!offer) return;
+    if (!offer || !offer.products_data) {
+        Alert.alert('Hata', 'Görüntülenecek teklif verisi bulunamadı.');
+        return;
+    }
+
     try {
-      await generateAndSharePDF({
-        businessName: visit.place_name,
-        date: new Date(offer.created_at).toLocaleDateString('tr-TR'),
-        products: offer.products_data,
-        totalPrice: offer.total_price,
-        isCampaignApplied: offer.is_campaign_applied,
-        wiredInstallationFee: 0 
-      });
+      // Veritabanındaki kayıtlı PDF verisini al
+      let pdfPayload = { ...offer.products_data };
+
+      // EĞER kayıtlı veride personel bilgisi yoksa (Eski kayıtlar için düzeltme)
+      // İlişkili tablodan (profiles) gelen güncel bilgiyi ekle
+      if (!pdfPayload.personnel && offer.profiles) {
+          pdfPayload.personnel = {
+              fullName: offer.profiles.full_name || 'Yetkili',
+              title: offer.profiles.titles?.name || 'Güvenlik Danışmanı',
+              email: offer.profiles.email || '',
+              phone: offer.profiles.phone || ''
+          };
+      }
+
+      // PDF oluştur ve paylaşımı aç (true parametresi ile)
+      await generateAndSharePDF(pdfPayload, true);
+
     } catch (e) {
+      console.error('PDF Oluşturma Hatası:', e);
       Alert.alert('Hata', 'PDF dosyası oluşturulurken bir sorun oluştu.');
     }
   };

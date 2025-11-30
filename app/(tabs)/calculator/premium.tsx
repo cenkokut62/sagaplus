@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, ActivityIndicator, TouchableOpacity, Switch } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, ActivityIndicator, TouchableOpacity, Switch, FlatList, Modal, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '@/contexts/ThemeContext';
 import { supabase } from '@/lib/supabase';
@@ -10,9 +10,8 @@ import { generateAndSharePDF } from '@/services/pdfService';
 import { Product } from '@/types/product';
 import { CustomInput } from '@/components/CustomInput'; 
 
-// Sabit Aktivasyon Ücreti (KDV Hariç)
 const FIXED_ACTIVATION_FEE_NO_KDV = 4560;
-const KDV_RATE = 1.20;
+const KDV_RATE = 0.20;
 
 const formatPrice = (price: number | string) => {
     const num = typeof price === 'string' ? parseFloat(price) : price;
@@ -27,6 +26,54 @@ interface VisitParams {
     isVisitFlow: string; 
 }
 
+// Kampanya Akordiyon Bileşeni (Premium - Detaylı)
+const CampaignAccordion = ({ monthlyNet, colors }: { monthlyNet: number, colors: any }) => {
+    const [expanded, setExpanded] = useState(false);
+    
+    const discountedNet = monthlyNet / 2;
+    const vatAmount = discountedNet * KDV_RATE;
+    const discountedTotal = discountedNet + vatAmount;
+    
+    const normalTotal = monthlyNet * (1 + KDV_RATE);
+    const benefitTotal = (normalTotal * 3) - (discountedTotal * 3);
+
+    return (
+        <View style={[styles.accordionContainer, { borderColor: colors.success, marginBottom: 15 }]}>
+            <TouchableOpacity onPress={() => setExpanded(!expanded)} style={[styles.accordionHeader, { backgroundColor: colors.success + '15' }]}>
+                <View style={{flexDirection:'row', alignItems:'center'}}>
+                    <Ionicons name="gift-outline" size={20} color={colors.success} style={{marginRight: 8}} />
+                    <Text style={[styles.accordionTitle, { color: colors.success }]}>İlk 3 Ay %50 İndirim Kampanyası</Text>
+                </View>
+                <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={20} color={colors.success} />
+            </TouchableOpacity>
+            {expanded && (
+                <View style={styles.accordionContent}>
+                    <View style={styles.accordionRow}>
+                        <Text style={{color: colors.textSecondary}}>İndirimli Aylık (Net):</Text>
+                        <Text style={{color: colors.text, fontWeight:'600'}}>{formatPrice(discountedNet)}</Text>
+                    </View>
+                    <View style={styles.accordionRow}>
+                        <Text style={{color: colors.textSecondary}}>KDV (%20):</Text>
+                        <Text style={{color: colors.text}}>{formatPrice(vatAmount)}</Text>
+                    </View>
+                    <View style={styles.accordionRow}>
+                        <Text style={{color: colors.textSecondary}}>İndirimli Aylık (Toplam):</Text>
+                        <Text style={{color: colors.text, fontWeight:'bold'}}>{formatPrice(discountedTotal)}</Text>
+                    </View>
+                    <View style={[styles.divider, { backgroundColor: colors.border }]} />
+                    <View style={styles.accordionRow}>
+                        <Text style={{color: colors.success, fontWeight:'bold'}}>3 Aylık Toplam Fayda:</Text>
+                        <Text style={{color: colors.success, fontWeight:'bold'}}>{formatPrice(benefitTotal)}</Text>
+                    </View>
+                    <Text style={{fontSize: 11, color: colors.textTertiary, marginTop: 5}}>
+                        * Kampanya kapsamında ilk 3 fatura %50 indirimli yansıtılacaktır.
+                    </Text>
+                </View>
+            )}
+        </View>
+    );
+};
+
 export default function PremiumCalculatorScreen() {
     const { colors } = useTheme();
     const router = useRouter();
@@ -36,12 +83,17 @@ export default function PremiumCalculatorScreen() {
     const [loading, setLoading] = useState(true);
     const [personnel, setPersonnel] = useState<any>(null);
     const [products, setProducts] = useState<Product[]>([]);
-    const [selectedProducts, setSelectedProducts] = useState<any[]>([]);
     
-    const [selectedHub, setSelectedHub] = useState<Product | null>(null); // Yeni Hub State
+    // SEÇİMLER
+    const [selectedHub, setSelectedHub] = useState<Product | null>(null);
+    const [selectedPeripherals, setSelectedPeripherals] = useState<any[]>([]); 
 
-    const [isCampaignApplied, setIsCampaignApplied] = useState(false);
-    const [wiredInstallationFee, setWiredInstallationFee] = useState('');
+    // MODAL
+    const [hubModalVisible, setHubModalVisible] = useState(false);
+    const [peripheralModalVisible, setPeripheralModalVisible] = useState(false);
+
+    // AYARLAR
+    const [isActivationFree, setIsActivationFree] = useState(false);
 
     const [modalVisible, setModalVisible] = useState(false);
     const [modalType, setModalType] = useState<'success' | 'error' | 'warning'>('default');
@@ -60,7 +112,6 @@ export default function PremiumCalculatorScreen() {
                 .single();
             setPersonnel(profile);
 
-            // Sadece Premium ürünleri çek
             const { data: productsData } = await supabase
                 .from('products')
                 .select('*')
@@ -78,70 +129,68 @@ export default function PremiumCalculatorScreen() {
         fetchInitialData();
     }, []));
 
-    // Ürünleri Hub'lara ve Uç Birimlere ayır
     const hubs = products.filter(p => p.type === 'package').sort((a, b) => (a.subscription_price || 0) - (b.subscription_price || 0));
     
     const compatiblePeripherals = products.filter(p => {
         if (p.type !== 'peripheral' || !selectedHub) return false;
-        
-        // Basit Hub/Hub2 uyumluluk kontrolü (varsayımsal)
-        const isCompatible = selectedHub.is_hub_compatible && p.is_hub_compatible || selectedHub.is_hub2_compatible && p.is_hub2_compatible;
+        const isCompatible = (selectedHub.is_hub_compatible && p.is_hub_compatible) || (selectedHub.is_hub2_compatible && p.is_hub2_compatible);
         return isCompatible;
     }).sort((a, b) => a.name.localeCompare(b.name));
 
-    // Hesaplama
-    const subTotal = selectedProducts.reduce((sum, p) => 
-        sum + (p.price * p.quantity), 0
-    );
+    // --- HESAPLAMALAR ---
+    
+    // 1. Aylık Abonelik
+    const hubPrice = selectedHub ? (selectedHub.subscription_price || 0) : 0;
+    const peripheralsTotal = selectedPeripherals.reduce((sum, p) => sum + (p.price * p.quantity), 0);
+    const monthlyNet = hubPrice + peripheralsTotal;
+    const monthlyVAT = monthlyNet * KDV_RATE;
+    const monthlyTotal = monthlyNet + monthlyVAT;
 
-    const totalInstallationFee = parseFloat(wiredInstallationFee || '0');
-    const activationFeeDisplay = FIXED_ACTIVATION_FEE_NO_KDV * KDV_RATE;
-    const grandTotal = subTotal + totalInstallationFee;
+    // 2. Tek Seferlik (Sadece Aktivasyon, Montaj Yok)
+    const activationFeeNet = isVisitFlow 
+        ? (isActivationFree ? 0 : FIXED_ACTIVATION_FEE_NO_KDV)
+        : 0;
+    const activationFeeVAT = activationFeeNet * KDV_RATE;
+    const activationFeeTotal = activationFeeNet + activationFeeVAT;
 
-    const handleHubSelection = (hub: Product) => {
-        // Yeni Hub seçildiğinde önceki tüm ürünleri (Hub hariç) sıfırla
+    const handleSelectHub = (hub: Product) => {
         setSelectedHub(hub);
-        const existingHub = selectedProducts.find(p => p.id === hub.id);
-        const hubPrice = hub.subscription_price || 0;
+        setHubModalVisible(false);
+        setSelectedPeripherals([]); // Hub değişince listeyi temizle
+    };
 
-        // Önceki Hub'ı kaldır, yenisini ekle (miktar 1)
-        setSelectedProducts(prev => {
-            const filtered = prev.filter(p => p.type !== 'package');
-            return [...filtered, { id: hub.id, name: hub.name, quantity: 1, price: hubPrice, type: 'package' }];
+    const handleAddPeripheral = (product: Product) => {
+        setPeripheralModalVisible(false);
+        setSelectedPeripherals(prev => {
+            const existing = prev.find(p => p.id === product.id);
+            const price = product.subscription_price || 0;
+            if (existing) {
+                return prev.map(p => p.id === product.id ? { ...p, quantity: p.quantity + 1 } : p);
+            } else {
+                return [...prev, { id: product.id, name: product.name, quantity: 1, price: price }];
+            }
         });
     };
-    
-    const handlePeripheralQuantityChange = (product: Product, quantity: number) => {
-        if (!selectedHub) return; // Hub seçilmeden ek birim eklenemez
-        
-        if (quantity <= 0) {
-            setSelectedProducts(prev => prev.filter(p => p.id !== product.id));
-        } else {
-            setSelectedProducts(prev => {
-                const existing = prev.find(p => p.id === product.id);
-                // Premium fiyatı
-                const price = product.subscription_price || 0; 
 
-                if (existing) {
-                    return prev.map(p => p.id === product.id ? { ...p, quantity, price, name: product.name } : p);
-                } else {
-                    return [...prev, { id: product.id, name: product.name, quantity, price, type: 'peripheral' }];
-                }
-            });
+    const updateQuantity = (index: number, change: number) => {
+        const item = selectedPeripherals[index];
+        const newQuantity = item.quantity + change;
+
+        if (newQuantity <= 0) {
+            const newList = [...selectedPeripherals];
+            newList.splice(index, 1);
+            setSelectedPeripherals(newList);
+        } else {
+            const newList = [...selectedPeripherals];
+            newList[index].quantity = newQuantity;
+            setSelectedPeripherals(newList);
         }
     };
 
     const handleCreateAndSaveOffer = async () => {
-        if (!isVisitFlow || !params.visitId) {
+        if (!isVisitFlow || !params.visitId || !selectedHub) {
             setModalType('error');
-            setModalMessage('Ziyaret bilgisi eksik. Teklif kaydedilemiyor.');
-            setModalVisible(true);
-            return;
-        }
-
-        if (subTotal <= 0 || !selectedHub) {
-            setModalType('warning');
-            setModalMessage('Teklif oluşturmak için lütfen öncelikle bir HUB seçin ve en az bir ürün seçin.');
+            setModalMessage('Hub seçimi yapılmadı veya ziyaret bilgisi eksik.');
             setModalVisible(true);
             return;
         }
@@ -149,13 +198,31 @@ export default function PremiumCalculatorScreen() {
         try {
             setLoading(true);
             
+            const productList = [
+                { name: selectedHub.name, quantity: 1, price: hubPrice },
+                ...selectedPeripherals.map(p => ({
+                    name: p.name, quantity: p.quantity, price: p.price
+                }))
+            ];
+
+            if (isVisitFlow) {
+                productList.push({ 
+                    name: isActivationFree ? 'Aktivasyon Bedeli (Kampanyalı)' : 'Aktivasyon Bedeli', 
+                    quantity: 1, 
+                    price: activationFeeNet 
+                });
+            }
+
+            // Genel Toplam (Abonelik + Aktivasyon)
+            const offerGrandTotal = monthlyTotal + activationFeeTotal;
+
             const pdfData = {
                 businessName: params.clientName || 'Yeni Müşteri',
                 date: new Date().toLocaleDateString('tr-TR'),
-                products: selectedProducts.map(p => ({ name: p.name, quantity: p.quantity, price: p.price })),
-                totalPrice: subTotal, 
-                isCampaignApplied: isCampaignApplied,
-                wiredInstallationFee: totalInstallationFee, 
+                products: productList,
+                totalPrice: monthlyNet, // Abonelik matrahı
+                isCampaignApplied: isActivationFree,
+                wiredInstallationFee: 0, // Premiumda yok
                 personnel: {
                     fullName: personnel?.full_name || 'Bilinmiyor',
                     title: personnel?.title || 'Danışman',
@@ -172,15 +239,15 @@ export default function PremiumCalculatorScreen() {
                     visit_id: params.visitId,
                     user_id: supabase.auth.user()?.id,
                     products_data: pdfData, 
-                    total_price: grandTotal, 
-                    is_campaign_applied: isCampaignApplied,
+                    total_price: offerGrandTotal, 
+                    is_campaign_applied: isActivationFree,
                     pdf_url: pdfUri, 
                 })
                 .select()
                 .single();
 
             setModalType('success');
-            setModalMessage('Teklif başarıyla oluşturuldu ve ziyarete kaydedildi.');
+            setModalMessage('Teklif başarıyla oluşturuldu.');
             setModalAction(() => () => router.replace({ 
                 pathname: '/(tabs)/visits/active', 
                 params: { visitId: params.visitId } 
@@ -188,10 +255,9 @@ export default function PremiumCalculatorScreen() {
             setModalVisible(true);
 
         } catch (error) {
-            console.error('Teklif kaydetme hatası:', error);
+            console.error('Hata:', error);
             setModalType('error');
-            setModalMessage('Teklif oluşturulurken bir hata oluştu. Lütfen tekrar deneyin.');
-            setModalAction(() => { setLoading(false); setModalVisible(false); });
+            setModalMessage('Hata oluştu.');
             setModalVisible(true);
         } finally {
             setLoading(false);
@@ -207,177 +273,201 @@ export default function PremiumCalculatorScreen() {
                     <Ionicons name="arrow-back" size={24} color={colors.text} />
                 </TouchableOpacity>
                 <Text style={[styles.headerTitle, { color: colors.text }]}>
-                    {isVisitFlow ? `${params.clientName} Teklif Hazırlama (Premium)` : 'Hesaplayıcı (Premium)'}
+                    {isVisitFlow ? `${params.clientName} (Premium)` : 'Hesaplayıcı (Premium)'}
                 </Text>
                 <View style={{ width: 24 }} />
             </View>
             
             <ScrollView contentContainerStyle={styles.scrollContent}>
                 
-                {isVisitFlow && (
-                    <View style={[styles.visitInfoCard, { backgroundColor: colors.primary + '10' }]}>
-                        <Ionicons name="location-outline" size={20} color={colors.primary} />
-                        <Text style={[styles.visitInfoText, { color: colors.primary }]}>Müşteri: {params.clientName}</Text>
-                    </View>
-                )}
-
-                {/* HUB SEÇİMİ */}
-                <Text style={[styles.sectionTitle, { color: colors.text }]}>1. HUB Seçimi (Ana Panel)</Text>
-                {hubs.map(product => {
-                    const isSelected = selectedHub && selectedHub.id === product.id;
-                    const price = product.subscription_price || 0;
-
-                    return (
-                        <TouchableOpacity
-                            key={product.id} 
-                            style={[
-                                styles.productRow, 
-                                { borderColor: isSelected ? colors.primary : colors.border, borderWidth: isSelected ? 2 : 1 }
-                            ]}
-                            onPress={() => handleHubSelection(product)}
+                {/* 1. HUB SEÇİMİ */}
+                <View style={styles.section}>
+                    <Text style={[styles.sectionTitle, { color: colors.text }]}>1. HUB Seçimi (Ana Panel)</Text>
+                    {selectedHub ? (
+                        <View style={[styles.selectedItemCard, { borderColor: colors.primary }]}>
+                            <View style={{flexDirection:'row', justifyContent:'space-between', alignItems:'center'}}>
+                                <View style={{flex: 1}}>
+                                    <Text style={[styles.itemName, { color: colors.text }]}>{selectedHub.name}</Text>
+                                    <Text style={{color: colors.textSecondary, fontSize: 12}}>Kale Alarm X Kontrol Paneli</Text>
+                                </View>
+                                <TouchableOpacity onPress={() => setSelectedHub(null)}>
+                                    <Ionicons name="close-circle" size={24} color={colors.error} />
+                                </TouchableOpacity>
+                            </View>
+                            <Text style={[styles.itemPrice, { color: colors.primary }]}>
+                                {formatPrice(hubPrice)} / Ay
+                            </Text>
+                        </View>
+                    ) : (
+                        <TouchableOpacity 
+                            style={[styles.selectButton, { borderColor: colors.border, borderStyle: 'dashed' }]}
+                            onPress={() => setHubModalVisible(true)}
                         >
-                            <View style={{ flex: 1 }}>
-                                <Text style={[styles.productName, { color: colors.text }]}>{product.name}</Text>
-                                <Text style={[styles.productPrice, { color: colors.textSecondary }]}>
-                                    Aylık: {formatPrice(price)}
-                                </Text>
-                            </View>
-                            <Ionicons 
-                                name={isSelected ? "checkmark-circle" : "radio-button-off-outline"} 
-                                size={26} 
-                                color={isSelected ? colors.success : colors.textTertiary} 
-                            />
+                            <Ionicons name="cube-outline" size={24} color={colors.primary} />
+                            <Text style={[styles.selectButtonText, { color: colors.primary }]}>HUB Seçiniz</Text>
                         </TouchableOpacity>
-                    );
-                })}
+                    )}
+                </View>
 
-                {/* UYUMLU UÇ BİRİM SEÇİMİ */}
-                <Text style={[styles.sectionTitle, { color: colors.text, marginTop: 20 }]}>2. Uyumlu Uç Birimler (Aksesuarlar)</Text>
-                {!selectedHub ? (
-                    <Text style={[styles.warningText, { color: colors.error }]}>Lütfen önce bir HUB (Ana Panel) seçin.</Text>
-                ) : (
-                    compatiblePeripherals.map(product => {
-                        const selected = selectedProducts.find(p => p.id === product.id);
-                        const quantity = selected ? selected.quantity : 0;
-                        const price = product.subscription_price || 0; 
-
-                        return (
-                            <View key={product.id} style={[styles.productRow, { borderColor: colors.border }]}>
-                                <View style={{ flex: 1 }}>
-                                    <Text style={[styles.productName, { color: colors.text }]}>{product.name}</Text>
-                                    <Text style={[styles.productPrice, { color: colors.textSecondary }]}>
-                                        Aylık: {formatPrice(price)}
-                                    </Text>
-                                </View>
-                                <View style={styles.quantityControl}>
-                                    <TouchableOpacity onPress={() => handlePeripheralQuantityChange(product, quantity - 1)} disabled={quantity === 0}>
-                                        <Ionicons name="remove-circle-outline" size={26} color={quantity > 0 ? colors.error : colors.textTertiary} />
-                                    </TouchableOpacity>
-                                    <Text style={[styles.quantityText, { color: colors.text }]}>{quantity}</Text>
-                                    <TouchableOpacity onPress={() => handlePeripheralQuantityChange(product, quantity + 1)}>
-                                        <Ionicons name="add-circle-outline" size={26} color={colors.primary} />
-                                    </TouchableOpacity>
-                                </View>
+                {/* 2. UÇ BİRİMLER */}
+                <View style={styles.section}>
+                    <Text style={[styles.sectionTitle, { color: colors.text }]}>2. Uyumlu Aksesuarlar</Text>
+                    
+                    {selectedPeripherals.map((item, index) => (
+                        <View key={index} style={[styles.peripheralRow, { borderBottomColor: colors.border }]}>
+                            <View style={{flex:1}}>
+                                <Text style={[styles.pName, { color: colors.text }]}>{item.name}</Text>
                             </View>
-                        );
-                    })
+                            
+                            <View style={styles.quantityControl}>
+                                <TouchableOpacity onPress={() => updateQuantity(index, -1)}>
+                                    <Ionicons name="remove-circle-outline" size={26} color={colors.error} />
+                                </TouchableOpacity>
+                                <Text style={[styles.quantityText, { color: colors.text }]}>{item.quantity}</Text>
+                                <TouchableOpacity onPress={() => updateQuantity(index, 1)}>
+                                    <Ionicons name="add-circle-outline" size={26} color={colors.primary} />
+                                </TouchableOpacity>
+                            </View>
+
+                            <Text style={[styles.pPrice, { color: colors.text, minWidth: 70, textAlign:'right' }]}>{formatPrice(item.price * item.quantity)}</Text>
+                        </View>
+                    ))}
+
+                    <TouchableOpacity 
+                        style={[styles.smallAddButton, { backgroundColor: colors.surface }]}
+                        onPress={() => {
+                            if (!selectedHub) {
+                                setModalType('warning');
+                                setModalMessage("Önce bir HUB seçmelisiniz.");
+                                setModalVisible(true);
+                                return;
+                            }
+                            setPeripheralModalVisible(true);
+                        }}
+                    >
+                        <Ionicons name="add" size={18} color={colors.primary} />
+                        <Text style={{ color: colors.primary, fontWeight: '600' }}>Aksesuar Ekle</Text>
+                    </TouchableOpacity>
+                </View>
+                
+                {/* 3. AKTİVASYON */}
+                {isVisitFlow && (
+                    <View style={styles.section}>
+                        <Text style={[styles.sectionTitle, { color: colors.text }]}>Hizmet Bedelleri</Text>
+                        <View style={[styles.activationBox, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                            <View style={styles.activationHeader}>
+                                <Text style={{color: colors.text, fontWeight:'600'}}>Aktivasyon Bedeli</Text>
+                                <TouchableOpacity 
+                                    onPress={() => setIsActivationFree(!isActivationFree)}
+                                    style={[styles.freeBtn, { backgroundColor: isActivationFree ? colors.success : colors.textTertiary }]}
+                                >
+                                    <Text style={{color: '#fff', fontSize: 11, fontWeight:'bold'}}>
+                                        {isActivationFree ? 'Ücretsiz Yapıldı' : 'Ücretsiz Yap'}
+                                    </Text>
+                                </TouchableOpacity>
+                            </View>
+                            <View style={{flexDirection:'row', alignItems:'center', marginTop: 5}}>
+                                <Text style={[
+                                    styles.activationPrice, 
+                                    { color: colors.text, textDecorationLine: isActivationFree ? 'line-through' : 'none', opacity: isActivationFree ? 0.5 : 1 }
+                                ]}>
+                                    {formatPrice(FIXED_ACTIVATION_FEE_NO_KDV)} + KDV
+                                </Text>
+                                {isActivationFree && (
+                                    <Text style={{color: colors.success, fontWeight:'bold', marginLeft: 10}}>0.00 ₺</Text>
+                                )}
+                            </View>
+                        </View>
+                    </View>
                 )}
-                
-                {/* Kampanya ve Montaj Ücreti */}
-                <Text style={[styles.sectionTitle, { color: colors.text, marginTop: 20 }]}>Aktivasyon ve Montaj Ücretleri</Text>
-                
-                <View style={[styles.extraRow, { borderColor: colors.border }]}>
-                    <View style={{ flex: 1 }}>
-                        <Text style={[styles.productName, { color: colors.text }]}>Tek Seferlik Aktivasyon Bedeli</Text>
-                        <Text style={[styles.productPrice, { color: colors.textSecondary }]}>4560₺ + KDV (Kampanyasız Toplam: {formatPrice(activationFeeDisplay)})</Text>
-                    </View>
-                    <Switch
-                        trackColor={{ false: colors.border, true: colors.success }}
-                        thumbColor={isCampaignApplied ? colors.cardBackground : colors.textSecondary}
-                        onValueChange={setIsCampaignApplied}
-                        value={isCampaignApplied}
-                    />
-                </View>
 
-                <View style={[styles.extraRow, { borderColor: colors.border }]}>
-                    <View style={{ flex: 1 }}>
-                        <Text style={[styles.productName, { color: colors.text }]}>Kablolu Montaj Farkı (₺)</Text>
-                        <Text style={[styles.productPrice, { color: colors.textSecondary }]}>Bu tutar teklife KDV hariç eklenir.</Text>
-                    </View>
-                    <View style={{ width: 100 }}>
-                        <CustomInput 
-                            value={wiredInstallationFee}
-                            onChangeText={setWiredInstallationFee}
-                            keyboardType="numeric"
-                            placeholder="0"
-                            textAlign='right'
-                        />
-                    </View>
-                </View>
-
-
-                {/* ÖZET KUTUSU */}
-                <View style={[styles.summaryCard, { backgroundColor: colors.surface, borderColor: colors.primary }]}>
-                    <Text style={[styles.summaryTitle, { color: colors.text }]}>Teklif Özeti (KDV HARİÇ)</Text>
+                {/* 4. FİYAT KARTI */}
+                <View style={[styles.priceCard, { backgroundColor: colors.cardBackground, borderColor: colors.border }]}>
+                    <Text style={[styles.priceCardTitle, { color: colors.text }]}>Fiyat Özeti (Aylık Abonelik)</Text>
                     
-                    <View style={styles.summaryRow}>
-                        <Text style={[styles.summaryLabel, { color: colors.textSecondary }]}>Abonelik Toplamı:</Text>
-                        <Text style={[styles.summaryValue, { color: colors.text }]}>{formatPrice(subTotal)}</Text>
+                    <CampaignAccordion monthlyNet={monthlyNet} colors={colors} />
+
+                    <View style={styles.priceRow}>
+                        <Text style={{color: colors.textSecondary}}>Aylık Abonelik (Net):</Text>
+                        <Text style={{color: colors.text, fontWeight: '600'}}>{formatPrice(monthlyNet)}</Text>
+                    </View>
+                    <View style={styles.priceRow}>
+                        <Text style={{color: colors.textSecondary}}>KDV (%20):</Text>
+                        <Text style={{color: colors.text}}>{formatPrice(monthlyVAT)}</Text>
                     </View>
                     
-                    <View style={styles.summaryRow}>
-                        <Text style={[styles.summaryLabel, { color: colors.textSecondary }]}>Montaj Farkı:</Text>
-                        <Text style={[styles.summaryValue, { color: colors.text }]}>{formatPrice(totalInstallationFee)}</Text>
-                    </View>
-
-                    <View style={styles.summaryRow}>
-                        <Text style={[styles.summaryLabel, { color: colors.textSecondary }]}>Aktivasyon (KDV Dahil):</Text>
-                        <Text style={[styles.summaryValue, { color: isCampaignApplied ? colors.success : colors.error }]}>
-                            {isCampaignApplied ? 'Ücretsiz (Kampanya)' : formatPrice(activationFeeDisplay)}
-                        </Text>
-                    </View>
-                        
-                    <View style={styles.summaryRowTotal}>
-                        <Text style={[styles.summaryTotalLabel, { color: colors.primary }]}>Teklif Toplam Tutar (KDV HARİÇ):</Text>
-                        <Text style={[styles.summaryTotalValue, { color: colors.primary }]}>
-                            {formatPrice(grandTotal)}
-                        </Text>
+                    <View style={[styles.totalRow, { borderTopColor: colors.border }]}>
+                        <Text style={[styles.totalLabel, { color: colors.primary }]}>AYLIK TOPLAM:</Text>
+                        <Text style={[styles.totalValue, { color: colors.primary }]}>{formatPrice(monthlyTotal)}</Text>
                     </View>
                 </View>
 
-                {/* TEKLİF KAYDET VE ÇIK BUTONU */}
+                {/* TEKLİF KAYDET */}
                 {isVisitFlow && (
                     <TouchableOpacity 
                         style={[styles.saveButton, { backgroundColor: colors.primary, opacity: loading ? 0.7 : 1 }]}
                         onPress={handleCreateAndSaveOffer}
-                        disabled={loading || !selectedHub || subTotal <= 0}
+                        disabled={loading || !selectedHub}
                     >
-                        {loading ? (
-                            <ActivityIndicator color="#fff" />
-                        ) : (
-                            <>
-                                <Ionicons name="save-outline" size={20} color="#fff" style={{ marginRight: 10 }} />
-                                <Text style={styles.saveButtonText}>Teklifi Oluştur ve Ziyarete Kaydet</Text>
-                            </>
+                        {loading ? <ActivityIndicator color="#fff" /> : (
+                            <Text style={styles.saveButtonText}>Teklifi Oluştur ve Kaydet</Text>
                         )}
                     </TouchableOpacity>
                 )}
 
             </ScrollView>
 
-            {/* CUSTOM MODAL */}
-            <CustomModal
-                visible={modalVisible}
-                onClose={() => { setModalVisible(false); }}
-                type={modalType}
-                title={modalType === 'success' ? 'Başarılı' : modalType === 'warning' ? 'Uyarı' : 'Hata'}
-            >
-                <Text style={{ textAlign: 'center', marginBottom: 20, color: colors.text }}>{modalMessage}</Text>
-                <ModalButton 
-                   title="Tamam" 
-                   onPress={() => { setModalVisible(false); modalType === 'success' && modalAction(); }} 
-                   variant={modalType === 'error' || modalType === 'warning' ? 'danger' : 'primary'}
-                />
+            {/* MODALLAR */}
+            <Modal visible={hubModalVisible} animationType="slide" presentationStyle="pageSheet">
+                <SafeAreaView style={{flex: 1, backgroundColor: colors.background}}>
+                    <View style={styles.modalHeader}>
+                        <Text style={[styles.modalTitle, {color: colors.text}]}>HUB Seçiniz</Text>
+                        <TouchableOpacity onPress={() => setHubModalVisible(false)}><Ionicons name="close" size={24} color={colors.text}/></TouchableOpacity>
+                    </View>
+                    <FlatList
+                        data={hubs}
+                        keyExtractor={item => item.id}
+                        contentContainerStyle={{padding: 20}}
+                        renderItem={({item}) => (
+                            <TouchableOpacity 
+                                style={[styles.modalItem, {backgroundColor: colors.surface}]}
+                                onPress={() => handleSelectHub(item)}
+                            >
+                                <Text style={[styles.modalItemText, {color: colors.text}]}>{item.name}</Text>
+                                <Text style={{color: colors.primary}}>{formatPrice(item.subscription_price || 0)}</Text>
+                            </TouchableOpacity>
+                        )}
+                    />
+                </SafeAreaView>
+            </Modal>
+
+            <Modal visible={peripheralModalVisible} animationType="slide" presentationStyle="pageSheet">
+                <SafeAreaView style={{flex: 1, backgroundColor: colors.background}}>
+                    <View style={styles.modalHeader}>
+                        <Text style={[styles.modalTitle, {color: colors.text}]}>Aksesuar Ekle</Text>
+                        <TouchableOpacity onPress={() => setPeripheralModalVisible(false)}><Ionicons name="close" size={24} color={colors.text}/></TouchableOpacity>
+                    </View>
+                    <FlatList
+                        data={compatiblePeripherals}
+                        keyExtractor={item => item.id}
+                        contentContainerStyle={{padding: 20}}
+                        renderItem={({item}) => (
+                            <TouchableOpacity 
+                                style={[styles.modalItem, {backgroundColor: colors.surface}]}
+                                onPress={() => handleAddPeripheral(item)}
+                            >
+                                <Text style={[styles.modalItemText, {color: colors.text}]}>{item.name}</Text>
+                                <Ionicons name="add-circle" size={24} color={colors.primary} />
+                            </TouchableOpacity>
+                        )}
+                        ListEmptyComponent={<Text style={{textAlign:'center', marginTop:20, color:colors.textSecondary}}>Bu Hub ile uyumlu başka aksesuar bulunamadı.</Text>}
+                    />
+                </SafeAreaView>
+            </Modal>
+
+            <CustomModal visible={modalVisible} onClose={() => setModalVisible(false)} type={modalType}>
+                <Text style={{textAlign:'center', marginBottom:15, color: colors.text}}>{modalMessage}</Text>
+                <ModalButton title="Tamam" onPress={() => { setModalVisible(false); if(modalType==='success') modalAction(); }} />
             </CustomModal>
         </SafeAreaView>
     );
@@ -391,91 +481,48 @@ const styles = StyleSheet.create({
     backButton: { padding: 4 },
     scrollContent: { paddingHorizontal: 20, paddingBottom: 40 },
     
-    visitInfoCard: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        padding: 12,
-        borderRadius: 12,
-        marginBottom: 20,
-        gap: 8,
-    },
-    visitInfoText: { fontSize: 14, fontWeight: '600' },
-    
+    section: { marginBottom: 24 },
     sectionTitle: { fontSize: 16, fontWeight: 'bold', marginBottom: 10 },
-    warningText: { fontSize: 14, fontStyle: 'italic', marginBottom: 10, paddingLeft: 5 },
     
-    productRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        paddingVertical: 12,
-        paddingHorizontal: 5,
-        borderBottomWidth: 1,
-        borderRadius: 10,
-        marginBottom: 5,
-    },
-    productName: { fontSize: 15, fontWeight: '500' },
-    productPrice: { fontSize: 13, marginTop: 2 },
+    selectButton: { borderWidth: 2, borderRadius: 12, height: 60, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
+    selectButtonText: { fontSize: 16, fontWeight: '600' },
     
-    quantityControl: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 10,
-    },
+    selectedItemCard: { borderWidth: 1, borderRadius: 12, padding: 15 },
+    itemName: { fontSize: 16, fontWeight: 'bold' },
+    itemPrice: { fontSize: 18, fontWeight: 'bold', marginTop: 10, textAlign: 'right' },
+    
+    peripheralRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1 },
+    pName: { fontSize: 14, fontWeight: '500' },
+    pPrice: { fontWeight: '600' },
+    quantityControl: { flexDirection: 'row', alignItems: 'center', gap: 10, marginHorizontal: 10 },
     quantityText: { fontSize: 16, fontWeight: '600', minWidth: 20, textAlign: 'center' },
+
+    smallAddButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 10, borderRadius: 8, marginTop: 10, gap: 5 },
     
-    extraRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        paddingVertical: 10,
-        borderBottomWidth: 1,
-    },
+    activationBox: { padding: 12, borderRadius: 8, borderWidth: 1, marginTop: 5 },
+    activationHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+    activationPrice: { fontSize: 16, fontWeight: 'bold' },
+    freeBtn: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4 },
 
-    summaryCard: {
-        marginTop: 25,
-        padding: 18,
-        borderRadius: 12,
-        borderWidth: 1,
-    },
-    summaryTitle: {
-        fontSize: 16,
-        fontWeight: 'bold',
-        marginBottom: 10,
-        borderBottomWidth: 1,
-        paddingBottom: 8,
-        borderColor: 'rgba(0,0,0,0.1)',
-    },
-    summaryRow: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        marginBottom: 6,
-    },
-    summaryLabel: { fontSize: 13 },
-    summaryValue: { fontSize: 13, fontWeight: 'bold' },
+    priceCard: { borderWidth: 1, borderRadius: 16, padding: 16 },
+    priceCardTitle: { fontSize: 16, fontWeight: 'bold', marginBottom: 10 },
+    priceRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 5 },
+    divider: { height: 1, marginVertical: 8 },
+    totalRow: { flexDirection: 'row', justifyContent: 'space-between', paddingTop: 10, borderTopWidth: 1, marginTop: 5 },
+    totalLabel: { fontSize: 16, fontWeight: 'bold' },
+    totalValue: { fontSize: 20, fontWeight: 'bold' },
+    
+    saveButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 16, borderRadius: 12, marginTop: 20 },
+    saveButtonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+    
+    modalHeader: { flexDirection: 'row', justifyContent: 'space-between', padding: 20, alignItems: 'center' },
+    modalTitle: { fontSize: 20, fontWeight: 'bold' },
+    modalItem: { padding: 15, borderRadius: 10, marginBottom: 10, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+    modalItemText: { fontSize: 16, fontWeight: '500', flex: 1 },
 
-    summaryRowTotal: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        marginTop: 10,
-        paddingTop: 8,
-        borderTopWidth: 1,
-        borderColor: 'rgba(0,0,0,0.2)',
-    },
-    summaryTotalLabel: { fontSize: 14, fontWeight: 'bold' },
-    summaryTotalValue: { fontSize: 16, fontWeight: 'bold' },
-
-    saveButton: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 16,
-        borderRadius: 12,
-        marginTop: 30,
-    },
-    saveButtonText: {
-        color: '#fff',
-        fontSize: 16,
-        fontWeight: 'bold',
-    }
+    accordionContainer: { borderWidth: 1, borderRadius: 8, marginBottom: 15, overflow: 'hidden' },
+    accordionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 10 },
+    accordionTitle: { fontSize: 13, fontWeight: '600' },
+    accordionContent: { padding: 10 },
+    accordionRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
 });
